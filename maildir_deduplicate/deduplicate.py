@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2010-2016 Kevin Deldycke <kevin@deldycke.com>
+# Copyright (C) 2010-2017 Kevin Deldycke <kevin@deldycke.com>
 #                         and contributors.
 # All Rights Reserved.
 #
@@ -71,13 +71,15 @@ class DuplicateSet(object):
 
         # Keep set metrics.
         self.stats = Counter()
+        self.stats['mail_duplicates'] += self.size
 
         logger.debug("{!r} created.".format(self))
 
     def __repr__(self):
         """ Print internal raw states for debugging. """
-        return "<{} hash={}, size={}, conf={!r}>".format(
-            self.__class__.__name__, self.hash_key, self.size, self.conf)
+        return "<{} hash={}, size={}, conf={!r}, pool={!r}>".format(
+            self.__class__.__name__,
+            self.hash_key, self.size, self.conf, self.pool)
 
     @cachedproperty
     def size(self):
@@ -169,16 +171,47 @@ class DuplicateSet(object):
             tofiledate='{:0.2f}'.format(mail_b.timestamp),
             n=0, lineterm='\n'))
 
-    def apply_strategy(self, strategy_id):
-        """ Apply deduplication on the mail subset with the provided strategy.
+    def apply_strategy(self):
+        """ Apply deduplication on the mail subset with the configured strategy.
 
         Transform strategy keyword into its method ID, and call it.
         """
-        method_id = strategy_id.replace('-', '_')
+        method_id = self.conf.strategy.replace('-', '_')
         if not hasattr(DuplicateSet, method_id):
             raise NotImplementedError(
                 "DuplicateSet.{}() method.".format(method_id))
         return getattr(self, method_id)()
+
+    def dedupe(self):
+        """ Performs the deduplication and its preliminary checks. """
+        if len(self.pool) == 1:
+            logger.debug("Ignore set: only one message found.")
+            self.stats['mail_unique'] += 1
+            self.stats['set_ignored'] += 1
+            return
+
+        try:
+            # Fine-grained checks on mail differences.
+            self.check_differences()
+            # Call the deduplication strategy.
+            self.apply_strategy()
+        except UnicodeDecodeError as expt:
+            self.stats['set_rejected_encoding'] += 1
+            logger.warning("Reject set: unparseable mails due to bad encoding.")
+            logger.debug(str(expt))
+        except SizeDiffAboveThreshold:
+            self.stats['set_rejected_size'] += 1
+            logger.warning("Reject set: mails are too dissimilar in size.")
+        except ContentDiffAboveThreshold:
+            self.stats['set_rejected_content'] += 1
+            logger.warning("Reject set: mails are too dissimilar in content.")
+        else:
+            # Count duplicate sets without deletion as skipped.
+            if not self.stats['mail_deleted']:
+                logger.info("Skip set: already deduplicated.")
+                self.stats['set_skipped'] += 1
+            else:
+                self.stats['set_deduplicated'] += 1
 
     # TODO: Factorize code structure common to all strategy.
 
@@ -442,6 +475,7 @@ class Deduplicate(object):
             # Total number of sets skipped as already deduplicated.
             'set_skipped': 0,
             # Number of sets ignored because they were faulty.
+            'set_rejected_encoding': 0,
             'set_rejected_size': 0,
             'set_rejected_content': 0,
             # Number of valid sets successfuly deduplicated.
@@ -530,46 +564,17 @@ class Deduplicate(object):
             if len(mail_set) == 1:
                 logger.debug("--- {} mails sharing hash {}".format(
                     len(mail_set), hash_key))
-                logger.debug("Ignore set: only one message found.")
-                self.stats['mail_unique'] += 1
-                self.stats['set_ignored'] += 1
-                continue
             else:
                 logger.info("--- {} mails sharing hash {}".format(
                     len(mail_set), hash_key))
 
             duplicates = DuplicateSet(hash_key, mail_set, self.conf)
 
-            self.stats['mail_duplicates'] += duplicates.size
-
-            # Fine-grained checks on mail differences.
-            try:
-                duplicates.check_differences()
-            except SizeDiffAboveThreshold:
-                self.stats['set_rejected_size'] += 1
-                logger.warning(
-                    "Reject set: mails are too dissimilar in size.")
-                continue
-            except ContentDiffAboveThreshold:
-                self.stats['set_rejected_content'] += 1
-                logger.warning(
-                    "Reject set: mails are too dissimilar in content.")
-                continue
-
-            # Call the deduplication strategy.
-            if self.conf.strategy:
-                duplicates.apply_strategy(self.conf.strategy)
+            # Perfom the deduplication.
+            duplicates.dedupe()
 
             # Merge stats resulting of actions on duplicate sets.
             self.stats += duplicates.stats
-
-            # If no mails were deleted, the set is already deduplicated.
-            if not duplicates.stats['mail_deleted']:
-                logger.info("Skip set: already deduplicated.")
-                self.stats['set_skipped'] += 1
-                continue
-
-            self.stats['set_deduplicated'] += 1
 
     def report(self):
         """ Print user-friendly statistics and metrics. """
@@ -587,6 +592,9 @@ class Deduplicate(object):
         table.append(["Total", self.stats['set_total']])
         table.append(["Ignored", self.stats['set_ignored']])
         table.append(["Skipped", self.stats['set_skipped']])
+        table.append([
+            "Rejected (bad encoding)",
+            self.stats['set_rejected_encoding']])
         table.append([
             "Rejected (too dissimilar in size)",
             self.stats['set_rejected_size']])
@@ -614,6 +622,7 @@ class Deduplicate(object):
         assert self.stats['set_total'] == (
             self.stats['set_ignored'] +
             self.stats['set_skipped'] +
+            self.stats['set_rejected_encoding'] +
             self.stats['set_rejected_size'] +
             self.stats['set_rejected_content'] +
             self.stats['set_deduplicated'])

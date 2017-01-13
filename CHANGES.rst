@@ -2,7 +2,7 @@ ChangeLog
 =========
 
 
-`2.0.2 (unreleased) <https://github.com/kdeldycke/maildir-deduplicate/compare/v2.0.1...develop>`_
+`2.1.0 (unreleased) <https://github.com/kdeldycke/maildir-deduplicate/compare/v2.0.1...develop>`_
 -------------------------------------------------------------------------------------------------
 
 .. note:: This version is not yet released and is under active development.
@@ -12,6 +12,9 @@ ChangeLog
 * Test builds against Python 3.6 and 3.7-dev, and most recent PyPy targetting
   Python 2.7 and 3.3.
 * Bump requirement to ``readme_renderer >= 16.0``.
+* Skip sets with unparseable mails because of incorrect encoding. Closes #47,
+  #41 and #39.
+* Require the ``-s``/``--strategy`` CLI parameter to be set. Closes #44.
 
 
 `2.0.1 (2016-11-28) <https://github.com/kdeldycke/maildir-deduplicate/compare/v2.0.0...v2.0.1>`_
